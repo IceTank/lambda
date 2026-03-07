@@ -35,19 +35,17 @@ object ServerFixes : Module(
 
 	@JvmStatic
 	fun fixBundleOrder(stack: ItemStack?) {
-		if (stack == null || stack.isEmpty) return  // Not applicable
-		if (!isEnabled || !bundleOrder) return  // Not enabled
+		if (stack == null || stack.isEmpty) return
+		if (!isEnabled || !bundleOrder) return
 
 		// Recurse container type items
 		if (stack.contains(DataComponentTypes.BUNDLE_CONTENTS)) {
-			//LOGGER.info("Fixing bundle contents");
 			stack.get<BundleContentsComponent?>(DataComponentTypes.BUNDLE_CONTENTS)?.let {
-				it.iterate().forEach { stack -> fixBundleOrder(stack) } // stream() returns copied Stacks
+				it.iterate().forEach { stack -> fixBundleOrder(stack) } // Recurse bundles in bundles
 			}
 		} else if (stack.contains(DataComponentTypes.CONTAINER)) {
-			//LOGGER.info("Fixing container contents");
 			stack.get<ContainerComponent?>(DataComponentTypes.CONTAINER)?.let {
-				it.iterateNonEmpty().forEach { stack -> fixBundleOrder(stack) } // stream() returns copied Stacks
+				it.iterateNonEmpty().forEach { stack -> fixBundleOrder(stack) } // Recurse containers in bundles
 			}
 		}
 
