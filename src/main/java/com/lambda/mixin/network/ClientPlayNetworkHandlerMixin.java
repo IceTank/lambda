@@ -22,6 +22,7 @@ import com.lambda.event.events.ChatEvent;
 import com.lambda.event.events.InventoryEvent;
 import com.lambda.event.events.WorldEvent;
 import com.lambda.interaction.managers.inventory.InventoryManager;
+import com.lambda.module.modules.client.ServerFixes;
 import com.lambda.module.modules.movement.Velocity;
 import com.lambda.module.modules.render.NoRender;
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
@@ -34,6 +35,8 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import static com.lambda.module.modules.client.ServerFixes.fixBundleOrder;
 
 @Mixin(ClientPlayNetworkHandler.class)
 public class ClientPlayNetworkHandlerMixin {
@@ -110,11 +113,14 @@ public class ClientPlayNetworkHandlerMixin {
 
     @WrapMethod(method = "onScreenHandlerSlotUpdate")
     private void wrapOnScreenHandlerSlotUpdate(ScreenHandlerSlotUpdateS2CPacket packet, Operation<Void> original) {
+        fixBundleOrder(packet.getStack());
         InventoryManager.onSlotUpdate(packet, original);
     }
 
     @WrapMethod(method = "onInventory")
     private void wrapOnInventory(InventoryS2CPacket packet, Operation<Void> original) {
+        packet.contents().forEach(ServerFixes::fixBundleOrder);
+        ServerFixes.fixBundleOrder(packet.cursorStack());
         InventoryManager.onInventoryUpdate(packet, original);
     }
 
@@ -131,5 +137,15 @@ public class ClientPlayNetworkHandlerMixin {
         if (NoRender.getNo2b2tActionText() && packet.text().getString().equals("2b2t.org")) {
             ci.cancel();
         }
+    }
+
+    @Inject(method = "onSetPlayerInventory", at = @At("HEAD"))
+    public void onSetPlayerInventory(SetPlayerInventoryS2CPacket packet, CallbackInfo info) {
+        fixBundleOrder(packet.contents());
+    }
+
+    @Inject(method = "onSetCursorItem", at = @At("HEAD"))
+    public void onSetCursorItem(SetCursorItemS2CPacket packet, CallbackInfo info) {
+        fixBundleOrder(packet.contents());
     }
 }
