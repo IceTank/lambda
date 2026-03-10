@@ -20,6 +20,7 @@ package com.lambda.mixin.network;
 import com.lambda.event.EventFlow;
 import com.lambda.event.events.ChatEvent;
 import com.lambda.event.events.InventoryEvent;
+import com.lambda.event.events.PlayerEvent;
 import com.lambda.event.events.WorldEvent;
 import com.lambda.interaction.managers.inventory.InventoryManager;
 import com.lambda.module.modules.client.ServerFixes;
@@ -28,13 +29,19 @@ import com.lambda.module.modules.render.NoRender;
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.PlayerListEntry;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityPosition;
 import net.minecraft.network.packet.s2c.play.*;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import java.util.Set;
 
 import static com.lambda.module.modules.client.ServerFixes.fixBundleOrder;
 
@@ -147,5 +154,26 @@ public class ClientPlayNetworkHandlerMixin {
     @Inject(method = "onSetCursorItem", at = @At("HEAD"))
     public void onSetCursorItem(SetCursorItemS2CPacket packet, CallbackInfo info) {
         fixBundleOrder(packet.contents());
+    }
+
+    @Inject(method = "onPlayerRespawn", at = @At("TAIL"))
+    void onPlayerRespawn(PlayerRespawnS2CPacket packet, CallbackInfo ci) {
+        EventFlow.post(new PlayerEvent.World.Respawn(packet));
+    }
+
+    @Inject(method = "onPlayerPositionLook", at = @At("TAIL"))
+    void onPlayerPositionLook(PlayerPositionLookS2CPacket packet, CallbackInfo ci) {
+        EventFlow.post(new PlayerEvent.World.PositionLook(packet));
+    }
+
+    @Inject(method = "setPosition", at = @At("TAIL"))
+    private static void onSetPosition(EntityPosition pos, Set<PositionFlag> flags, Entity entity, boolean bl,
+                                      CallbackInfoReturnable<Boolean> cir) {
+        if (cir.getReturnValue() == false) {
+            var player = MinecraftClient.getInstance().player;
+            assert player != null;
+            var event = new PlayerEvent.World.SetPosition(player.getEntityPos(), player.getVelocity(), player.getYaw(), player.getPitch());
+            EventFlow.post(event);
+        }
     }
 }

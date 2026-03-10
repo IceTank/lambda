@@ -33,6 +33,7 @@ import com.lambda.interaction.managers.rotating.visibilty.lookAt
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
 import com.lambda.threading.runSafe
+import com.lambda.util.Communication.info
 import com.lambda.util.Describable
 import com.lambda.util.NamedEnum
 import com.lambda.util.extension.rotation
@@ -97,6 +98,7 @@ object Freecam : Module(
 
 	private var rotation: Rotation = Rotation.ZERO
 	private var velocity: Vec3d = Vec3d.ZERO
+    private var loading = false
 
 	@JvmStatic
 	fun updateCam() {
@@ -155,6 +157,28 @@ object Freecam : Module(
 			rotation = rotation.withDelta(it.deltaYaw * SENSITIVITY_FACTOR, it.deltaPitch * SENSITIVITY_FACTOR)
 			it.cancel()
 		}
+        listen<PlayerEvent.World.Respawn> {
+            loading = true
+            info("Respawned, waiting for position look packet to update freecam position...")
+        }
+
+        listen<PlayerEvent.World.SetPosition> {
+            info("Received position look packet, updating freecam position")
+            info("New position: ${it.position}")
+            if (loading) {
+                loading = false
+                position = player.eyePos
+                rotation = player.rotation
+            }
+        }
+
+        listen<PlayerEvent.ChangeLookDirection> {
+            rotation = rotation.withDelta(
+                it.deltaYaw * SENSITIVITY_FACTOR,
+                it.deltaPitch * SENSITIVITY_FACTOR
+            )
+            it.cancel()
+        }
 
 		listen<MovementEvent.InputUpdate> { event ->
 			mc.options.perspective = Perspective.FIRST_PERSON
