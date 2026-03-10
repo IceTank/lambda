@@ -29,6 +29,12 @@ Find our backup matrix space at [\#lambda-client:matrix.org](https://app.element
 
 -----
 
+## IceTank fork
+
+This is a fork of Lambda with extra features not yet merged into the main repository. See the [Recent Changes](#recent-changes-1211) section below for a list of new features and modules added in this fork.
+
+-----
+
 ## Features
 
 ### Automation Engine
@@ -51,6 +57,32 @@ Find our backup matrix space at [\#lambda-client:matrix.org](https://app.element
 
 ### Specialized Tools
 * **HighwayTools:** Completely rewritten for efficient infrastructure maintenance.
+
+-----
+
+## Recent Changes (1.21.11)
+
+The following features and fixes have been merged into the `1.21.11` branch:
+
+### New Modules merged into this fork
+* **InventoryCleaner** — Automatically drops unwanted items from your inventory with configurable item filtering and drop speed.
+* **AutoMend** — Automatically manages item mending.
+* **AutoWalk** — Basic AutoWalk module with a setting to decrease walk speed directly.
+* **AutoSpiral** — Automated spiral movement that works in overworld-like worlds and the nether.
+* **AutoSign** — Autofills sign texts and auto-closes opened signs, with 2b2t compatibility fixes.
+* **AutoMount** — Automatically mounts or remounts entities with configurable rotation modes.
+* **ModuleNotifier** — Sends chat feedback when modules are toggled on or off.
+* **ServerFixes** — Adds server-specific fixes (e.g., 2b2t compatibility patches).
+
+### New Features & Improvements
+* **Better List Selection** — New popup modal window for list-based setting selection in the GUI.
+* **Freecam Tracking Mode** — Adds a tracking mode to Freecam with relative mode and "Keep Y Level" option.
+* **Improved Better Firework Takeoff** — Jump-until-takeoff setting to improve elytra takeoff by jumping multiple times or holding jump in water.
+* **NoRender: No 2b2t Action Text** — New setting under the HUD group to block the action bar text sent by 2b2t.org.
+
+### Bug Fixes
+* **Freecam Loading Screen Fix** — Fixed Freecam causing a stuck loading screen when changing dimensions.
+* **Printer Air Setting** — Renamed and added a description to the "Air" setting in the Printer module; printing now only considers enabled placements and blocks inside schematics.
 
 -----
 
