@@ -30,7 +30,6 @@ import com.lambda.module.tag.ModuleTag
 import com.lambda.util.KeyCode
 import com.lambda.util.extension.rotation
 import com.lambda.util.math.flooredBlockPos
-import com.lambda.util.math.vec3d
 import com.lambda.util.world.raycast.RayCastUtils.orMiss
 import net.minecraft.util.hit.HitResult
 import net.minecraft.util.math.BlockPos
@@ -44,15 +43,14 @@ object AreaSelection : Module(
     description = "Select and drag areas",
     tag = ModuleTag.PLAYER,
 ) {
+    var pos1 by setting("Position 1", BlockPos.ORIGIN, "First corner of the selection area")
+    var pos2 by setting("Position 2", BlockPos.ORIGIN, "Second corner of the selection area")
     private val resetSelectionBoxes by setting("Reset Selection Boxes", Bind.EMPTY, "Reset the positions of the area selection boxes to your current view")
         .onPress {
             val basePos = currentViewPosition().flooredBlockPos
             pos1 = basePos
             pos2 = basePos
         }
-
-    private var pos1 = BlockPos.ORIGIN
-    private var pos2 = BlockPos.ORIGIN
 
     private enum class HandleAxis(val direction: Vec3d, val color: Color) {
         POS_X(Vec3d(1.0, 0.0, 0.0), Color(255, 60, 60)),
