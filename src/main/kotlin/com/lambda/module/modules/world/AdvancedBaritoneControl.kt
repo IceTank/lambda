@@ -17,16 +17,29 @@
 
 package com.lambda.module.modules.world
 
+import baritone.api.pathing.goals.GoalBlock
+import com.lambda.config.AutomationConfig.Companion.setDefaultAutomationConfig
+import com.lambda.config.applyEdits
+import com.lambda.context.AutomatedSafeContext
 import com.lambda.context.SafeContext
 import com.lambda.event.events.PlayerEvent
+import com.lambda.event.events.TickEvent
 import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
+import com.lambda.interaction.BaritoneManager
+import com.lambda.interaction.construction.simulation.context.BuildContext
+import com.lambda.interaction.managers.breaking.BreakRequest
+import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakRequest
 import com.lambda.module.Module
 import com.lambda.module.tag.ModuleTag
+import com.lambda.threading.runSafeAutomated
 import com.lambda.util.Communication.info
+import com.lambda.util.Communication.warn
+import com.lambda.util.math.distSq
 import it.unimi.dsi.fastutil.longs.*
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
 import kotlin.time.measureTime
 
@@ -35,14 +48,22 @@ object AdvancedBaritoneControl : Module(
 	description = "Module to direct Baritone to do things like mining and building using a simple planing algorithm",
 	tag = ModuleTag.WORLD
 ) {
-	val homePos by setting("Home Position", BlockPos.ORIGIN, description = "Position the pathfinder should always be able to return to")
+	var homePos by setting("Home Position", BlockPos.ORIGIN, description = "Position the pathfinder should always be able to return to")
 	val maxDistance by setting("Max Distance", 10, 1..50, description = "Maximum distance from home position to grow the graph to. Higher values allow for bigger graphs.")
 	val logTimeTake by setting("Log Time Take", false, description = "Whether to log the time it takes to update the graph when blocks are changed")
 
 	val closedSet = Long2ObjectArrayMap<Node>()
 	val openSet = mutableSetOf<Node>()
 
+	var clearJob: ClearAreaJob? = null
+
 	init {
+		setDefaultAutomationConfig {
+			applyEdits {
+				hideAllGroupsExcept(breakConfig)
+			}
+		}
+
 		listen<PlayerEvent.Interact.Block> { event ->
 			if (player.mainHandStack.item == Items.DIAMOND_SHOVEL) {
 				val node = closedSet.getOrDefault(event.blockHitResult.blockPos.offset(event.blockHitResult.side).asLong(), null) ?: return@listen
@@ -50,11 +71,12 @@ object AdvancedBaritoneControl : Module(
 
 				val targetNode = closedSet.getOrDefault(event.blockHitResult.blockPos.asLong(), null) ?: return@listen
 				info("Block node valid: ${targetNode.isBlockValid()}")
-				handleBlockUpdate(event.blockHitResult.blockPos)
 
 				return@listen
 			}
 			if (player.mainHandStack.item == Items.FEATHER) {
+				val hitPos = event.blockHitResult.blockPos.add(event.blockHitResult.side.vector)
+				homePos = hitPos
 				val homeNode = Node(homePos, 0, null)
 				openSet.clear()
 				closedSet.clear()
@@ -67,6 +89,22 @@ object AdvancedBaritoneControl : Module(
 		listen<WorldEvent.BlockUpdate.Client> { event ->
 			handleBlockUpdate(event.pos)
 		}
+
+		listen<TickEvent.Pre> {
+			runSafeAutomated {
+				clearJob?.tick()
+				if (clearJob?.done == true) {
+					info("Finished clearing area")
+					clearJob = null
+				}
+			}
+		}
+	}
+
+	fun clearArea(pos1: BlockPos, pos2: BlockPos): ClearAreaJob {
+		val job = ClearAreaJob(pos1, pos2)
+		clearJob = job
+		return job
 	}
 
 	/**
@@ -222,6 +260,111 @@ object AdvancedBaritoneControl : Module(
 				}
 			}
 			return list
+		}
+	}
+
+	class ClearAreaJob(val pos1: BlockPos, val pos2: BlockPos) {
+		var currentNodeGoal: Node? = null
+		private val pendingActions = ConcurrentLinkedQueue<BuildContext>()
+		var done = false
+		var breakRequest: BreakRequest? = null
+
+		context(automatedSafeContext: AutomatedSafeContext)
+		fun tick(): Boolean {
+			if (done) return true
+			if (BaritoneManager.isActive) {
+				return false
+			}
+			if (breakRequest?.done == true) {
+				breakRequest = null
+				currentNodeGoal = null
+			} else if (breakRequest != null) {
+				return false
+			}
+			currentNodeGoal?.let { goal ->
+				if (automatedSafeContext.player.distSq(goal.pos) < 16) {
+					val deadEndNodes = automatedSafeContext.deadEndNodesAroundMe().filterNot { automatedSafeContext.world.getBlockState(it.pos.down()).isAir }
+					if (deadEndNodes.isNotEmpty()) {
+						breakRequest = automatedSafeContext
+							.breakRequest(deadEndNodes.map { it.pos.down() }, pendingActions)
+							?.submit()
+						if (breakRequest == null) {
+							automatedSafeContext.info("Request null")
+							done = true
+							return true
+						}
+						return false
+					} else {
+						breakRequest = null
+						currentNodeGoal = null
+					}
+				} else {
+					automatedSafeContext.warn("Something when wrong")
+					done = true
+					return true
+				}
+			}
+
+			val (deadEnds, all) = automatedSafeContext.nextBlockToClear()
+
+			val blocksToClear = if (deadEnds.isNotEmpty()) {
+				deadEnds.sortedWith(Comparator.comparingInt { pos -> pos.distSq(automatedSafeContext.player.blockPos) })
+			} else {
+				all.sortedWith(Comparator.comparingInt { pos -> pos.distSq(automatedSafeContext.player.blockPos) }).reversed()
+			}
+			if (blocksToClear.isEmpty()) {
+				done = true
+				return true
+			}
+
+			val node = closedSet.getOrDefault(blocksToClear.first().up().asLong(), null) ?: run {
+				info("Why")
+				done = true
+				return true
+			}
+
+			node.parentNode?.let {
+				currentNodeGoal = node
+				BaritoneManager.setGoalAndPath(GoalBlock(it.pos))
+				return false
+			}
+
+			return false
+		}
+
+		fun SafeContext.deadEndNodesAroundMe(): List<Node> {
+			return BlockPos.iterateOutwards(player.blockPos, 5, 2, 5)
+				.mapNotNull { closedSet.getOrDefault(it.asLong(), null) }
+				.filter { it.childNodes.isEmpty() }
+		}
+
+		fun SafeContext.nextBlockToClear(): Pair<MutableList<BlockPos>, MutableList<BlockPos>> {
+			val deadEndPositions = mutableListOf<BlockPos>()
+			val all = mutableListOf<BlockPos>()
+			val min = BlockPos(
+				minOf(pos1.x, pos2.x),
+				minOf(pos1.y, pos2.y),
+				minOf(pos1.z, pos2.z)
+			)
+			val max = BlockPos(
+				maxOf(pos1.x, pos2.x) + 1,
+				maxOf(pos1.y, pos2.y) + 1,
+				maxOf(pos1.z, pos2.z) + 1
+			)
+			for (x in min.x..max.x) {
+				for (y in min.y..max.y) {
+					for (z in min.z..max.z) {
+						val pos = BlockPos(x, y, z)
+						val node = closedSet.getOrDefault(pos.up().asLong(), null) ?: continue
+						if (node.parentNode == null) continue // don't break home node
+						if (!world.getBlockState(pos).isAir) {
+							all.add(pos)
+							if (node.childNodes.isEmpty()) deadEndPositions.add(pos)
+						}
+					}
+				}
+			}
+			return deadEndPositions to all
 		}
 	}
 }
