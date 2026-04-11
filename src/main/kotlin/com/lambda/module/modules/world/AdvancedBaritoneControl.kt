@@ -36,7 +36,7 @@ import com.lambda.threading.runSafeAutomated
 import com.lambda.util.Communication.info
 import com.lambda.util.Communication.warn
 import com.lambda.util.math.distSq
-import it.unimi.dsi.fastutil.longs.*
+import it.unimi.dsi.fastutil.longs.Long2ObjectArrayMap
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -51,9 +51,11 @@ object AdvancedBaritoneControl : Module(
 	var homePos by setting("Home Position", BlockPos.ORIGIN, description = "Position the pathfinder should always be able to return to")
 	val maxDistance by setting("Max Distance", 10, 1..50, description = "Maximum distance from home position to grow the graph to. Higher values allow for bigger graphs.")
 	val logTimeTake by setting("Log Time Take", false, description = "Whether to log the time it takes to update the graph when blocks are changed")
+	val edgeRemappingForCost by setting("Edge Cost remapping", true, description = "Redirects node connections to more optimal paths when")
+	val edgeSumBalancing by setting("Edge Sum Balancing", true, description = "Balances incoming connections to a node to make the graph more uniform.")
 
 	val closedSet = Long2ObjectArrayMap<Node>()
-	val openSet = mutableSetOf<Node>()
+	val queue = ArrayDeque<Node>()
 
 	var clearJob: ClearAreaJob? = null
 
@@ -66,11 +68,9 @@ object AdvancedBaritoneControl : Module(
 
 		listen<PlayerEvent.Interact.Block> { event ->
 			if (player.mainHandStack.item == Items.DIAMOND_SHOVEL) {
-				val node = closedSet.getOrDefault(event.blockHitResult.blockPos.offset(event.blockHitResult.side).asLong(), null) ?: return@listen
-				info("Children: ${node.childNodes.size} Weak Links: ${node.weakLinks.size} Distance from home: ${node.distanceFromStart}")
-
-				val targetNode = closedSet.getOrDefault(event.blockHitResult.blockPos.asLong(), null) ?: return@listen
-				info("Block node valid: ${targetNode.isBlockValid()}")
+				val node = closedSet.getOrDefault(event.blockHitResult.blockPos.asLong(), null)
+					?: closedSet.getOrDefault(event.blockHitResult.blockPos.offset(event.blockHitResult.side, 1).asLong(), null) ?: return@listen
+				redirectNodeConnections(node)
 
 				return@listen
 			}
@@ -78,11 +78,11 @@ object AdvancedBaritoneControl : Module(
 				val hitPos = event.blockHitResult.blockPos.add(event.blockHitResult.side.vector)
 				homePos = hitPos
 				val homeNode = Node(homePos, 0, null)
-				openSet.clear()
+				queue.clear()
 				closedSet.clear()
-				openSet.add(homeNode)
+				queue.add(homeNode)
 				closedSet.put(homeNode.pos.asLong(), homeNode)
-				grow(homePos, homeNode)
+				grow(homeNode)
 			}
 		}
 
@@ -112,7 +112,7 @@ object AdvancedBaritoneControl : Module(
 	 */
 	private fun SafeContext.removeNode(node: Node): List<Node> {
 		closedSet.remove(node.pos.asLong())
-		openSet.remove(node)
+		queue.remove(node)
 		node.parentNode?.childNodes?.remove(node)
 
 		node.neighbors().forEach { neighbor ->
@@ -150,7 +150,7 @@ object AdvancedBaritoneControl : Module(
 							val node = closedSet[checkPos.asLong()] ?: continue
 							if (node.isBlockValid()) {
 								//							info("Node at $checkPos is now valid, growing back")
-								grow(homePos, node)
+								grow(node)
 							}
 						}
 					}
@@ -175,57 +175,125 @@ object AdvancedBaritoneControl : Module(
 	 * Expects the start node to already be removed from the closed set
 	 */
 	private fun SafeContext.removeAndPruneNodes(start: Node) {
-		val openSet0: MutableSet<Node> = mutableSetOf()
+		val childQueue: MutableSet<Node> = mutableSetOf()
 		val nodesToGrowBack = mutableSetOf<Node>()
-		openSet0.addAll(start.childNodes)
+		childQueue.addAll(start.childNodes)
 		removeNode(start)
 
-		while (openSet0.isNotEmpty()) {
-			val node = openSet0.first()
-			openSet0.remove(node)
+		while (childQueue.isNotEmpty()) {
+			val node = childQueue.first()
+			childQueue.remove(node)
 
 			// parentNode == null is root/home node
-			if (node.parentNode != null && node.parentNode.pos.asLong() !in closedSet) {
+			node.parentNode?.takeIf { it.pos.asLong() !in closedSet }?.let {
 				removeNode(node)
 				node.weakLinks.forEach { weakLink ->
 					if (weakLink.pos.asLong() in closedSet) {
 						nodesToGrowBack.add(weakLink)
 					}
 				}
-				openSet0.addAll(node.childNodes)
+				childQueue.addAll(node.childNodes)
 			}
 		}
 		for (node in nodesToGrowBack) {
 			if (node.isBlockValid() && node.pos.asLong() in closedSet) {
-//				info("Node at ${node.pos} is now valid, growing back")
-				grow(homePos, node)
+				//				info("Node at ${node.pos} is now valid, growing back")
+				grow(node)
 			}
 		}
 	}
 
-	private fun SafeContext.grow(origin: BlockPos, node: Node, depth: Int = 0) {
-		if (node.pos.getManhattanDistance(origin) > maxDistance) return
-
-		node.neighbors().forEach { neighbor ->
-			if (neighbor.asLong() !in closedSet) {
-				val newNode = Node(neighbor, node.distanceFromStart + 1, node)
-				openSet.add(newNode)
-				closedSet.put(newNode.pos.asLong(), newNode)
-				node.childNodes.add(newNode)
-				grow(origin, newNode, depth + 1)
+	private fun SafeContext.grow(start: Node) {
+		closedSet.put(start.pos.asLong(), start)
+		queue.add(start)
+		while (true) {
+			val node = queue.removeFirstOrNull() ?: break
+			node.neighbors().forEach { neighbor ->
+				if (neighbor.asLong() !in closedSet) {
+					val newNode = Node(neighbor, node.distanceFromStart + 1, node)
+					queue.addLast(newNode)
+					closedSet.put(newNode.pos.asLong(), newNode)
+					node.childNodes.add(newNode)
+				}
 			}
-		}
-		node.neighbors().forEach { neighbor ->
-			val existingNode = closedSet.getOrDefault(neighbor.asLong(), null)
-			if (existingNode != null && existingNode !in node.childNodes && existingNode != node.parentNode) {
-				existingNode.weakLinks.add(node)
-				node.weakLinks.add(existingNode)
-				return@forEach
+			node.neighbors().forEach { neighbor ->
+				closedSet.getOrDefault(neighbor.asLong(), null)
+					?.takeIf { it !in node.childNodes && it != node.parentNode }
+					?.let { existingNode ->
+						existingNode.weakLinks.add(node)
+						node.weakLinks.add(existingNode)
+					}
+			}
+			if (edgeRemappingForCost) {
+				val visited = mutableSetOf<Node>()
+				val queue = ArrayDeque<Node>()
+				queue.add(node)
+				while (true) {
+					val node = queue.removeFirstOrNull() ?: break
+					visited.add(node)
+					redirectNodeConnections(node)
+						.filter { it !in visited }
+						.forEach { if (it !in queue) queue.add(it) }
+				}
 			}
 		}
 	}
 
-	class Node(val pos: BlockPos, val distanceFromStart: Int, val parentNode: Node?, val childNodes: MutableSet<Node> = mutableSetOf(), val weakLinks: MutableSet<Node> = mutableSetOf()) {
+	/**
+	 * Redirects a nodes parent node to a weak link if the weak link node has a shorter distance from the start
+	 *
+	 * If a shorter node (betterNode) path exists:
+	 *
+	 * The current node gets it's parent node set to the betterNode
+	 * The betterNode node gets it's weak link to the current node removed
+	 * The betterNode node gets the current node added as a child
+	 *
+	 * The old parent node gets the current node removed as a child
+	 * The old parent node gets the current node added as a weak link
+	 *
+	 * The current node gets the old parent node added as a weak link
+	 * The current node gets the betterNode removed as a weak link
+	 *
+	 * The current node gets it's distance from start updated to the betterNode distance from start + 1
+	 *
+	 * Returns a list of affected nodes. Affected nodes might have an incorrect distance from start until updated.
+	 */
+	private fun SafeContext.redirectNodeConnections(node: Node): List<Node> {
+		val parentNode = node.parentNode ?: return emptyList()
+
+		val affectedNodes = mutableListOf<Node>()
+		if (parentNode.distanceFromStart < node.distanceFromStart - 1) {
+			node.distanceFromStart = parentNode.distanceFromStart + 1
+			affectedNodes.addAll(node.childNodes)
+		}
+		var betterNode: Node? = null
+		for (weakLink in node.weakLinks) {
+			if (weakLink.distanceFromStart < parentNode.distanceFromStart) {
+				if ((betterNode?.distanceFromStart ?: Int.MAX_VALUE) < weakLink.distanceFromStart) {
+					continue
+				}
+				betterNode = weakLink
+			}
+		}
+		if (betterNode != null) {
+			// Redirect to better node
+			node.parentNode = betterNode
+			betterNode.weakLinks.remove(node)
+			betterNode.childNodes.add(node)
+
+			parentNode.childNodes.remove(node)
+			parentNode.weakLinks.add(node)
+
+			node.weakLinks.add(parentNode)
+			node.weakLinks.remove(betterNode)
+
+			node.distanceFromStart = betterNode.distanceFromStart + 1
+			affectedNodes.addAll(node.weakLinks)
+		}
+		return affectedNodes
+	}
+
+	class Node(val pos: BlockPos, var distanceFromStart: Int, var parentNode: Node?, val childNodes: MutableSet<Node> = mutableSetOf(), val weakLinks: MutableSet<Node> = mutableSetOf()) {
 		override fun equals(other: Any?): Boolean {
 			if (this === other) return true
 			if (other !is Node) return false

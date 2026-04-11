@@ -18,6 +18,8 @@
 package com.lambda.module.modules.render
 
 import com.lambda.graphics.mc.RenderBuilder
+import com.lambda.graphics.mc.RenderBuilder.SDFShadow
+import com.lambda.graphics.mc.RenderBuilder.SDFStyle
 import com.lambda.graphics.mc.renderer.TickedRenderer.Companion.tickedRenderer
 import com.lambda.module.Module
 import com.lambda.module.modules.world.AdvancedBaritoneControl
@@ -28,6 +30,7 @@ import com.lambda.util.math.setAlpha
 import com.lambda.util.math.times
 import com.lambda.util.math.vec3d
 import net.minecraft.util.math.BlockPos
+import net.minecraft.util.math.Direction
 import net.minecraft.util.math.Vec3d
 import java.awt.Color
 
@@ -39,6 +42,7 @@ object NavigationRender : Module(
 	val depthTest by setting("Depth Test", true, description = "Whether to render with depth test or not. Disable if you want to see renders through walls")
 	val horizontalRange by setting("Horizontal Range", 10, 1..50, description = "Horizontal range to render light levels for")
 	val verticalRange by setting("Vertical Range", 5, 1..50, description = "Vertical range to render light levels for")
+	val distanceFromStart by setting("Distance From Start", false, description = "Display distance from start")
 
 	init {
 		tickedRenderer("LightLevels Ticked Renderer", { depthTest }) { safeContext ->
@@ -71,23 +75,30 @@ object NavigationRender : Module(
 		val corner2 = renderVec.add(1.0 - trueSize, 0.05, trueSize)
 		val corner3 = renderVec.add(1.0 - trueSize, 0.05, 1.0 - trueSize)
 		val corner4 = renderVec.add(trueSize, 0.05, 1.0 - trueSize)
-//		val color = connectedNodes[pos.asLong()]?.connectedNodes?.size?.let { Color(if (it > 1) Colors.GREEN else Colors.RED) } ?: return
 		val node = AdvancedBaritoneControl.closedSet.getOrDefault(pos.asLong(), null) ?: return
 		val color = if (node.childNodes.isNotEmpty()) Color.ORANGE else Color.RED
 
 		node.weakLinks.forEach { weakLink ->
 			val weakLinkVec = weakLink.pos.vec3d.add(0.5, 0.5, 0.5)
-//			line(renderVec.add(0.5, 0.5, 0.5), weakLinkVec, Color.YELLOW.setAlpha(0.2), width = 0.02f)
 			arrow(renderVec.add(0.5, 0.5, 0.5), weakLinkVec, Color.YELLOW, width = 0.02f)
 		}
 
 		filledQuad(corner1, corner2, corner3, corner4, color.setAlpha(0.2))
 		polyline(listOf(corner1, corner2, corner3, corner4, corner1), color)
 
-		if (node.parentNode != null) {
-			val parentVec = node.parentNode.pos.vec3d.add(0.5, 0.5, 0.5)
-//			line(renderVec.add(0.5, 0.5, 0.5), parentVec, Color.GREEN, width = 0.02f)
-			arrow(renderVec.add(0.5, 0.5, 0.5).add(0.0, 0.2, 0.0), parentVec.add(0.0, 0.2, 0.0), Color.GREEN, width = 0.02f)
+		node.parentNode?.let { parent ->
+			val parentVec = parent.pos.toCenterPos()
+			arrow(renderVec.add(0.5, 0.5, 0.5).offset(Direction.UP, 0.2), parentVec.offset(Direction.UP, 0.2), Color.GREEN, width = 0.02f)
+		}
+		if (distanceFromStart) {
+			worldText(
+				node.distanceFromStart.toString(),
+				node.pos.toCenterPos().offset(Direction.UP, -0.2),
+				style = SDFStyle(
+					shadow = SDFShadow()
+				),
+				size = 0.2f
+			)
 		}
 	}
 
