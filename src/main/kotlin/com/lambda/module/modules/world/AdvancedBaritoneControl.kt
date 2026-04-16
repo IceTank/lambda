@@ -28,19 +28,24 @@ import com.lambda.event.events.WorldEvent
 import com.lambda.event.listener.SafeListener.Companion.listen
 import com.lambda.interaction.BaritoneManager
 import com.lambda.interaction.construction.simulation.context.BuildContext
-import com.lambda.interaction.managers.breaking.BreakRequest
 import com.lambda.interaction.managers.breaking.BreakRequest.Companion.breakRequest
 import com.lambda.module.Module
+import com.lambda.module.modules.player.AreaSelection.pos1
+import com.lambda.module.modules.player.AreaSelection.pos2
 import com.lambda.module.tag.ModuleTag
 import com.lambda.threading.runSafeAutomated
 import com.lambda.util.Communication.info
-import com.lambda.util.Communication.warn
+import com.lambda.util.Timer
+import com.lambda.util.math.dist
 import com.lambda.util.math.distSq
+import fi.dy.masa.litematica.data.DataManager
 import it.unimi.dsi.fastutil.longs.Long2ObjectArrayMap
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
+import net.minecraft.util.math.Box
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 
 object AdvancedBaritoneControl : Module(
@@ -53,6 +58,7 @@ object AdvancedBaritoneControl : Module(
 	val logTimeTake by setting("Log Time Take", false, description = "Whether to log the time it takes to update the graph when blocks are changed")
 	val edgeRemappingForCost by setting("Edge Cost remapping", true, description = "Redirects node connections to more optimal paths when")
 	val edgeSumBalancing by setting("Edge Sum Balancing", true, description = "Balances incoming connections to a node to make the graph more uniform.")
+	val areaSelectionMode by setting("Area Selection", AreaSelection.Baritone, description = "Selection Method to use")
 
 	val closedSet = Long2ObjectArrayMap<Node>()
 	val queue = ArrayDeque<Node>()
@@ -101,8 +107,8 @@ object AdvancedBaritoneControl : Module(
 		}
 	}
 
-	fun clearArea(pos1: BlockPos, pos2: BlockPos): ClearAreaJob {
-		val job = ClearAreaJob(pos1, pos2)
+	fun clearArea(): ClearAreaJob {
+		val job = ClearAreaJob()
 		clearJob = job
 		return job
 	}
@@ -128,7 +134,7 @@ object AdvancedBaritoneControl : Module(
 		val timeTaken = measureTime {
 			for (x in -1..1) {
 				for (z in -1..1) {
-					for (y in 0..1) {
+					for (y in -2..2) {
 						if (abs(x) > 0 && abs(z) > 0) continue // no diagonals
 
 						val checkPos = BlockPos(pos.x + x, pos.y + y, pos.z + z)
@@ -142,7 +148,7 @@ object AdvancedBaritoneControl : Module(
 			// Grow back
 			for (x in -1..1) {
 				for (z in -1..1) {
-					for (y in 0..1) {
+					for (y in -1..2) {
 						if (abs(x) > 0 && abs(z) > 0) continue // no diagonals
 
 						val checkPos = BlockPos(pos.x + x, pos.y + y, pos.z + z)
@@ -308,7 +314,9 @@ object AdvancedBaritoneControl : Module(
 		fun isBlockValid(blockPos: BlockPos? = null): Boolean {
 			val pos = blockPos ?: this.pos
 			with(safeContext) {
-				return world.getBlockState(pos.down()).isSolidBlock(world, pos.down()) && world.getBlockState(pos).isAir
+				return world.getBlockState(pos.down()).isSolidBlock(world, pos.down())
+						&& world.getBlockState(pos).isAir
+						&& world.getBlockState(pos.up()).isAir
 			}
 		}
 
@@ -318,12 +326,14 @@ object AdvancedBaritoneControl : Module(
 			// same y level forward
 			for (x in -1..1) {
 				for (z in -1..1) {
-					if (x == 0 && z == 0) continue
-					if (abs(x) > 0 && abs(z) > 0) continue // no diagonals
+					for (y in -1..1) {
+						if (x == 0 && z == 0) continue // skip self and vertical neighbors
+						if (abs(x) > 0 && abs(z) > 0) continue // no diagonals
 
-					val pos = BlockPos(pos.x + x, pos.y, pos.z + z)
-					if (isBlockValid(pos)) {
-						list.add(BlockPos(pos))
+						val pos = BlockPos(pos.x + x, pos.y + y, pos.z + z)
+						if (isBlockValid(pos)) {
+							list.add(pos)
+						}
 					}
 				}
 			}
@@ -331,50 +341,43 @@ object AdvancedBaritoneControl : Module(
 		}
 	}
 
-	class ClearAreaJob(val pos1: BlockPos, val pos2: BlockPos) {
+	private fun SafeContext.isStandingOnBlock(pos: BlockPos): Boolean {
+		val playerBox = player.boundingBox.expand(-0.2, 1.0, -0.2)
+		val blockBox = Box(pos)
+		return playerBox.intersects(blockBox)
+	}
+
+	class ClearAreaJob() {
 		var currentNodeGoal: Node? = null
 		private val pendingActions = ConcurrentLinkedQueue<BuildContext>()
 		var done = false
-		var breakRequest: BreakRequest? = null
+		var lastPos: BlockPos = BlockPos.ORIGIN
+		val timeoutTimer = Timer()
 
 		context(automatedSafeContext: AutomatedSafeContext)
 		fun tick(): Boolean {
 			if (done) return true
+
+			with(automatedSafeContext) {
+				val deadEndNodesNear = deadEndNodesAroundMe(4f)
+					.filter { !isStandingOnBlock(it.pos) }
+				if (deadEndNodesNear.isNotEmpty()) {
+					if (player.blockPos != lastPos) {
+						timeoutTimer.reset()
+						lastPos = player.blockPos
+					}
+					if (!timeoutTimer.timePassed(10.seconds)) {
+						breakRequest(deadEndNodesNear.map { it.pos.down() }, pendingActions)
+							?.submit()
+						return false
+					}
+				}
+			}
 			if (BaritoneManager.isActive) {
 				return false
 			}
-			if (breakRequest?.done == true) {
-				breakRequest = null
-				currentNodeGoal = null
-			} else if (breakRequest != null) {
-				return false
-			}
-			currentNodeGoal?.let { goal ->
-				if (automatedSafeContext.player.distSq(goal.pos) < 16) {
-					val deadEndNodes = automatedSafeContext.deadEndNodesAroundMe().filterNot { automatedSafeContext.world.getBlockState(it.pos.down()).isAir }
-					if (deadEndNodes.isNotEmpty()) {
-						breakRequest = automatedSafeContext
-							.breakRequest(deadEndNodes.map { it.pos.down() }, pendingActions)
-							?.submit()
-						if (breakRequest == null) {
-							automatedSafeContext.info("Request null")
-							done = true
-							return true
-						}
-						return false
-					} else {
-						breakRequest = null
-						currentNodeGoal = null
-					}
-				} else {
-					automatedSafeContext.warn("Something when wrong")
-					done = true
-					return true
-				}
-			}
 
 			val (deadEnds, all) = automatedSafeContext.nextBlockToClear()
-
 			val blocksToClear = if (deadEnds.isNotEmpty()) {
 				deadEnds.sortedWith(Comparator.comparingInt { pos -> pos.distSq(automatedSafeContext.player.blockPos) })
 			} else {
@@ -400,25 +403,58 @@ object AdvancedBaritoneControl : Module(
 			return false
 		}
 
-		fun SafeContext.deadEndNodesAroundMe(): List<Node> {
+		fun SafeContext.deadEndNodesAroundMe(range: Float): List<Node> {
 			return BlockPos.iterateOutwards(player.blockPos, 5, 2, 5)
 				.mapNotNull { closedSet.getOrDefault(it.asLong(), null) }
+				.filter { it.pos.dist(player.eyePos) < range }
 				.filter { it.childNodes.isEmpty() }
+		}
+
+		private fun getArea(): Pair<BlockPos, BlockPos>? {
+			return when (areaSelectionMode) {
+				AreaSelection.AreaSelector -> {
+					val min = BlockPos(
+						minOf(pos1.x, pos2.x),
+						minOf(pos1.y, pos2.y),
+						minOf(pos1.z, pos2.z)
+					)
+					val max = BlockPos(
+						maxOf(pos1.x, pos2.x) + 1,
+						maxOf(pos1.y, pos2.y) + 1,
+						maxOf(pos1.z, pos2.z) + 1
+					)
+					min to max
+				}
+				AreaSelection.Baritone -> {
+					val selection = BaritoneManager.selections().firstOrNull()?: return null
+					selection.min() to selection.max()
+				}
+				AreaSelection.SchematicPlacement -> {
+					if (!Printer.litematicaAvailable()) {
+						return null
+					}
+					val placement = DataManager.getSchematicPlacementManager()?.allSchematicsPlacements?.firstOrNull {
+						it.isEnabled
+					} ?: return null
+					placement.eclosingBox?.let {
+						val pos1 = it.pos1
+						val pos2 = it.pos2
+						if (pos1 != null && pos2 != null) {
+							val min = BlockPos(minOf(pos1.x, pos2.x), minOf(pos1.y, pos2.y), minOf(pos1.z, pos2.z))
+							val max = BlockPos(maxOf(pos1.x, pos2.x) + 1, maxOf(pos1.y, pos2.y) + 1, maxOf(pos1.z, pos2.z) + 1)
+							min to max
+						} else {
+							null
+						}
+					}
+				}
+			}
 		}
 
 		fun SafeContext.nextBlockToClear(): Pair<MutableList<BlockPos>, MutableList<BlockPos>> {
 			val deadEndPositions = mutableListOf<BlockPos>()
 			val all = mutableListOf<BlockPos>()
-			val min = BlockPos(
-				minOf(pos1.x, pos2.x),
-				minOf(pos1.y, pos2.y),
-				minOf(pos1.z, pos2.z)
-			)
-			val max = BlockPos(
-				maxOf(pos1.x, pos2.x) + 1,
-				maxOf(pos1.y, pos2.y) + 1,
-				maxOf(pos1.z, pos2.z) + 1
-			)
+			val (min, max) = getArea() ?: return deadEndPositions to all
 			for (x in min.x..max.x) {
 				for (y in min.y..max.y) {
 					for (z in min.z..max.z) {
@@ -434,5 +470,11 @@ object AdvancedBaritoneControl : Module(
 			}
 			return deadEndPositions to all
 		}
+	}
+
+	enum class AreaSelection {
+		Baritone,
+		AreaSelector,
+		SchematicPlacement
 	}
 }

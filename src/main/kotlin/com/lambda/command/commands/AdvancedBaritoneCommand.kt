@@ -38,7 +38,7 @@ object AdvancedBaritoneCommand : LambdaCommand(
 	override fun CommandBuilder.create() {
 		required(literal("cleararea")) {
 			execute {
-				AdvancedBaritoneControl.clearArea(AreaSelection.pos1, AreaSelection.pos2)
+				AdvancedBaritoneControl.clearArea()
 			}
 		}
 	}

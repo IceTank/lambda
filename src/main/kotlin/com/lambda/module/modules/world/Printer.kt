@@ -93,7 +93,7 @@ object Printer : Module(
 		else isInFlatten(buildResult.pos, flattenMode, sneakLowersFlatten, baritoneSelection, inverseSelection)
 	}
 
-	private fun litematicaAvailable(): Boolean = runCatching {
+	fun litematicaAvailable(): Boolean = runCatching {
 		Class.forName("fi.dy.masa.litematica.Litematica")
 		true
 	}.getOrDefault(false)

@@ -21,6 +21,7 @@ import baritone.api.BaritoneAPI
 import baritone.api.IBaritone
 import baritone.api.Settings
 import baritone.api.pathing.goals.Goal
+import baritone.api.selection.ISelection
 import com.lambda.config.AutomationConfig
 import com.lambda.config.Configurable
 import com.lambda.config.configurations.LambdaConfig
@@ -385,5 +386,10 @@ object BaritoneManager : Configurable(LambdaConfig), Automated by AutomationConf
         if (!isBaritoneLoaded) return
         primary?.pathingBehavior?.cancelEverything()
         primary?.elytraProcess?.resetState()
+    }
+
+    fun selections(): Array<out ISelection?> {
+        if (!isBaritoneLoaded) return emptyArray()
+        return primary?.selectionManager?.selections?: emptyArray()
     }
 }
