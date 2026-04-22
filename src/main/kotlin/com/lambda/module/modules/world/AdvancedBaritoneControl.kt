@@ -18,6 +18,7 @@
 package com.lambda.module.modules.world
 
 import baritone.api.pathing.goals.GoalBlock
+import baritone.api.pathing.goals.GoalComposite
 import com.lambda.config.AutomationConfig.Companion.setDefaultAutomationConfig
 import com.lambda.config.applyEdits
 import com.lambda.context.AutomatedSafeContext
@@ -39,12 +40,14 @@ import com.lambda.util.Timer
 import com.lambda.util.math.dist
 import com.lambda.util.math.distSq
 import fi.dy.masa.litematica.data.DataManager
-import it.unimi.dsi.fastutil.longs.Long2ObjectArrayMap
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import net.minecraft.item.Items
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 
@@ -57,10 +60,12 @@ object AdvancedBaritoneControl : Module(
 	val maxDistance by setting("Max Distance", 10, 1..50, description = "Maximum distance from home position to grow the graph to. Higher values allow for bigger graphs.")
 	val logTimeTake by setting("Log Time Take", false, description = "Whether to log the time it takes to update the graph when blocks are changed")
 	val edgeRemappingForCost by setting("Edge Cost remapping", true, description = "Redirects node connections to more optimal paths when")
-	val edgeSumBalancing by setting("Edge Sum Balancing", true, description = "Balances incoming connections to a node to make the graph more uniform.")
+//	val edgeSumBalancing by setting("Edge Sum Balancing", true, description = "Balances incoming connections to a node to make the graph more uniform.")
 	val areaSelectionMode by setting("Area Selection", AreaSelection.Baritone, description = "Selection Method to use")
+	val clearInSlices by setting("Clear By Slices", false, description = "Clear blocks by vertical slices")
+	val sliceThickness by setting("Slice Thickness", 3, 1..10, description = "Thickness of vertical slices when clearing by slices")
 
-	val closedSet = Long2ObjectArrayMap<Node>()
+	val closedSet = Long2ObjectOpenHashMap<Node>()
 	val queue = ArrayDeque<Node>()
 
 	var clearJob: ClearAreaJob? = null
@@ -68,7 +73,7 @@ object AdvancedBaritoneControl : Module(
 	init {
 		setDefaultAutomationConfig {
 			applyEdits {
-				hideAllGroupsExcept(breakConfig)
+				hideAllGroupsExcept(breakConfig, hotbarConfig)
 			}
 		}
 
@@ -88,7 +93,7 @@ object AdvancedBaritoneControl : Module(
 				closedSet.clear()
 				queue.add(homeNode)
 				closedSet.put(homeNode.pos.asLong(), homeNode)
-				grow(homeNode)
+				expandNode(homeNode)
 			}
 		}
 
@@ -104,6 +109,11 @@ object AdvancedBaritoneControl : Module(
 					clearJob = null
 				}
 			}
+		}
+
+		onDisable {
+			BaritoneManager.cancel()
+			clearJob = null
 		}
 	}
 
@@ -156,7 +166,7 @@ object AdvancedBaritoneControl : Module(
 							val node = closedSet[checkPos.asLong()] ?: continue
 							if (node.isBlockValid()) {
 								//							info("Node at $checkPos is now valid, growing back")
-								grow(node)
+								expandNode(node)
 							}
 						}
 					}
@@ -204,12 +214,13 @@ object AdvancedBaritoneControl : Module(
 		for (node in nodesToGrowBack) {
 			if (node.isBlockValid() && node.pos.asLong() in closedSet) {
 				//				info("Node at ${node.pos} is now valid, growing back")
-				grow(node)
+				expandNode(node)
 			}
 		}
 	}
 
-	private fun SafeContext.grow(start: Node) {
+	private fun SafeContext.expandNode(start: Node) {
+		if (start.distanceFromStart > maxDistance) return
 		closedSet.put(start.pos.asLong(), start)
 		queue.add(start)
 		while (true) {
@@ -347,13 +358,68 @@ object AdvancedBaritoneControl : Module(
 		return playerBox.intersects(blockBox)
 	}
 
-	class ClearAreaJob() {
-		var currentNodeGoal: Node? = null
+	private fun inArea(pos: BlockPos): Boolean {
+		val area = getArea() ?: return false
+		return area.first.x <= pos.x && pos.x <= area.second.x
+				&& area.first.y <= pos.y && pos.y <= area.second.y
+				&& area.first.z <= pos.z && pos.z <= area.second.z
+	}
+
+	private fun getArea(): Pair<BlockPos, BlockPos>? {
+		return when (areaSelectionMode) {
+			AreaSelection.AreaSelector -> {
+				val min = BlockPos(
+					minOf(pos1.x, pos2.x),
+					minOf(pos1.y, pos2.y),
+					minOf(pos1.z, pos2.z)
+				)
+				val max = BlockPos(
+					maxOf(pos1.x, pos2.x) + 1,
+					maxOf(pos1.y, pos2.y) + 1,
+					maxOf(pos1.z, pos2.z) + 1
+				)
+				min to max
+			}
+			AreaSelection.Baritone -> {
+				val selection = BaritoneManager.selections().firstOrNull()?: return null
+				selection.min() to selection.max()
+			}
+			AreaSelection.SchematicPlacement -> {
+				if (!Printer.litematicaAvailable()) {
+					return null
+				}
+				val placement = DataManager.getSchematicPlacementManager()?.allSchematicsPlacements?.firstOrNull {
+					it.isEnabled
+				} ?: return null
+				placement.eclosingBox?.let {
+					val pos1 = it.pos1
+					val pos2 = it.pos2
+					if (pos1 != null && pos2 != null) {
+						val min = BlockPos(minOf(pos1.x, pos2.x), minOf(pos1.y, pos2.y), minOf(pos1.z, pos2.z))
+						val max = BlockPos(maxOf(pos1.x, pos2.x) + 1, maxOf(pos1.y, pos2.y) + 1, maxOf(pos1.z, pos2.z) + 1)
+						min to max
+					} else {
+						null
+					}
+				}
+			}
+		}
+	}
+
+
+	class ClearAreaJob {
 		private val pendingActions = ConcurrentLinkedQueue<BuildContext>()
 		var done = false
 		var lastPos: BlockPos = BlockPos.ORIGIN
 		val timeoutTimer = Timer()
 
+		val slicesCleared = mutableListOf<BlockPos>()
+
+		/**
+		 * Ticks the clear area job
+		 *
+		 * @return true if the job is done, false otherwise
+		 */
 		context(automatedSafeContext: AutomatedSafeContext)
 		fun tick(): Boolean {
 			if (done) return true
@@ -377,29 +443,39 @@ object AdvancedBaritoneControl : Module(
 				return false
 			}
 
-			val (deadEnds, all) = automatedSafeContext.nextBlockToClear()
-			val blocksToClear = if (deadEnds.isNotEmpty()) {
-				deadEnds.sortedWith(Comparator.comparingInt { pos -> pos.distSq(automatedSafeContext.player.blockPos) })
+			val (deadEnds, all) = automatedSafeContext.getDeadenedNodes()
+			val nodesToClear = if (deadEnds.isNotEmpty()) {
+				deadEnds.sortedWith(Comparator.comparingInt { node -> node.pos.distSq(automatedSafeContext.player.blockPos) })
 			} else {
-				all.sortedWith(Comparator.comparingInt { pos -> pos.distSq(automatedSafeContext.player.blockPos) }).reversed()
+				all.sortedWith(Comparator.comparingInt { node -> node.pos.distSq(automatedSafeContext.player.blockPos) }).reversed()
 			}
-			if (blocksToClear.isEmpty()) {
+			if (nodesToClear.isEmpty()) {
+				val area = getArea()
+				if (clearInSlices && area != null) {
+					val maxSlice = slicesCleared.maxOfOrNull { it.x } ?: min(area.first.x, area.second.x)
+					if (maxSlice > max(area.first.x, area.second.x)) {
+						done = true
+						return true
+					}
+					automatedSafeContext.info("Moving to next slice to clear")
+					repeat(sliceThickness) { i ->
+						slicesCleared.add(BlockPos(maxSlice + i, 0, 0))
+					}
+					return false
+				}
 				done = true
 				return true
 			}
 
-			val node = closedSet.getOrDefault(blocksToClear.first().up().asLong(), null) ?: run {
-				info("Why")
+			val parentNodes = nodesToClear.mapNotNull { it.parentNode }
+			if (parentNodes.isEmpty()) {
 				done = true
 				return true
 			}
+			val goals = parentNodes.map { GoalBlock(it.pos) }.toTypedArray()
+			val compGoal = GoalComposite(*goals)
 
-			node.parentNode?.let {
-				currentNodeGoal = node
-				BaritoneManager.setGoalAndPath(GoalBlock(it.pos))
-				return false
-			}
-
+			BaritoneManager.setGoalAndPath(compGoal)
 			return false
 		}
 
@@ -407,69 +483,45 @@ object AdvancedBaritoneControl : Module(
 			return BlockPos.iterateOutwards(player.blockPos, 5, 2, 5)
 				.mapNotNull { closedSet.getOrDefault(it.asLong(), null) }
 				.filter { it.pos.dist(player.eyePos) < range }
+				.applyIf(clearInSlices) {
+					filter { inSlice(it.pos.x) }
+				}
 				.filter { it.childNodes.isEmpty() }
 		}
 
-		private fun getArea(): Pair<BlockPos, BlockPos>? {
-			return when (areaSelectionMode) {
-				AreaSelection.AreaSelector -> {
-					val min = BlockPos(
-						minOf(pos1.x, pos2.x),
-						minOf(pos1.y, pos2.y),
-						minOf(pos1.z, pos2.z)
-					)
-					val max = BlockPos(
-						maxOf(pos1.x, pos2.x) + 1,
-						maxOf(pos1.y, pos2.y) + 1,
-						maxOf(pos1.z, pos2.z) + 1
-					)
-					min to max
-				}
-				AreaSelection.Baritone -> {
-					val selection = BaritoneManager.selections().firstOrNull()?: return null
-					selection.min() to selection.max()
-				}
-				AreaSelection.SchematicPlacement -> {
-					if (!Printer.litematicaAvailable()) {
-						return null
-					}
-					val placement = DataManager.getSchematicPlacementManager()?.allSchematicsPlacements?.firstOrNull {
-						it.isEnabled
-					} ?: return null
-					placement.eclosingBox?.let {
-						val pos1 = it.pos1
-						val pos2 = it.pos2
-						if (pos1 != null && pos2 != null) {
-							val min = BlockPos(minOf(pos1.x, pos2.x), minOf(pos1.y, pos2.y), minOf(pos1.z, pos2.z))
-							val max = BlockPos(maxOf(pos1.x, pos2.x) + 1, maxOf(pos1.y, pos2.y) + 1, maxOf(pos1.z, pos2.z) + 1)
-							min to max
-						} else {
-							null
-						}
-					}
-				}
-			}
+		/**
+		 * Checks if a given x coordinates lays within the current slice being cleared. Only relevant if clearInSlices is true and an area is selected.
+		 */
+		fun inSlice(x: Int): Boolean {
+			if (!clearInSlices) return true
+
+			val area = getArea() ?: return true
+			val currentSlice = if (slicesCleared.isEmpty()) min(area.first.x, area.second.x)
+			else slicesCleared.maxOf { it.x } + 1
+			return x >= currentSlice && x < currentSlice + sliceThickness
 		}
 
-		fun SafeContext.nextBlockToClear(): Pair<MutableList<BlockPos>, MutableList<BlockPos>> {
-			val deadEndPositions = mutableListOf<BlockPos>()
-			val all = mutableListOf<BlockPos>()
-			val (min, max) = getArea() ?: return deadEndPositions to all
-			for (x in min.x..max.x) {
-				for (y in min.y..max.y) {
-					for (z in min.z..max.z) {
-						val pos = BlockPos(x, y, z)
-						val node = closedSet.getOrDefault(pos.up().asLong(), null) ?: continue
-						if (node.parentNode == null) continue // don't break home node
-						if (!world.getBlockState(pos).isAir) {
-							all.add(pos)
-							if (node.childNodes.isEmpty()) deadEndPositions.add(pos)
-						}
-					}
+		fun SafeContext.getDeadenedNodes(): Pair<MutableList<Node>, MutableList<Node>> {
+			val deadEndNodes = mutableListOf<Node>()
+			val allNodes = mutableListOf<Node>()
+			if (getArea() == null) return deadEndNodes to allNodes
+
+			for (node in closedSet.values) {
+				if (node.parentNode == null) continue
+				if (!inArea(node.pos.down())) continue
+				if (!inSlice(node.pos.x)) continue
+
+				if (node.isBlockValid()) {
+					allNodes.add(node)
+					if (node.childNodes.isEmpty()) deadEndNodes.add(node)
 				}
 			}
-			return deadEndPositions to all
+			return deadEndNodes to allNodes
 		}
+	}
+
+	inline fun <T> T.applyIf(condition: Boolean, block: T.() -> T): T {
+		return if (condition) block() else this
 	}
 
 	enum class AreaSelection {

@@ -56,15 +56,15 @@ class BlockPosSetting(defaultValue: BlockPos) : SettingCore<BlockPos>(
 	}
 
 	context(setting: Setting<*, BlockPos>)
-    override fun CommandBuilder.buildCommand(registry: CommandRegistryAccess) {
-        required(integer("X", -30000000, 30000000)) { x ->
-            required(integer("Y", -64, 319)) { y ->
-                required(integer("Z", -30000000, 30000000)) { z ->
-                    execute {
-                        setting.trySetValue(BlockPos(x().value(), y().value(), z().value()))
-                    }
-                }
-            }
-        }
-    }
+	override fun CommandBuilder.buildCommand(registry: CommandRegistryAccess) {
+		required(integer("X", -30000000, 30000000)) { x ->
+			required(integer("Y", -64, 319)) { y ->
+				required(integer("Z", -30000000, 30000000)) { z ->
+					execute {
+						setting.trySetValue(BlockPos(x().value(), y().value(), z().value()))
+					}
+				}
+			}
+		}
+	}
 }
