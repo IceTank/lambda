@@ -24,6 +24,7 @@ import com.lambda.graphics.mc.renderer.ChunkedRenderer.Companion.chunkedRenderer
 import com.lambda.graphics.mc.renderer.ImmediateRenderer.Companion.immediateRenderer
 import com.lambda.graphics.mc.renderer.RendererUtils.worldToScreenNormalized
 import com.lambda.module.Module
+import com.lambda.module.modules.world.NoSpawnerDetector.dungeonGroundBlocks
 import com.lambda.module.tag.ModuleTag
 import com.lambda.sound.SoundManager
 import com.lambda.threading.runSafe
@@ -31,9 +32,6 @@ import com.lambda.util.Communication.info
 import com.lambda.util.Describable
 import com.lambda.util.NamedEnum
 import com.lambda.util.world.toBlockPos
-import it.unimi.dsi.fastutil.objects.ReferenceArraySet
-import net.minecraft.block.Block
-import net.minecraft.block.Blocks
 import net.minecraft.block.entity.BlockEntityType
 import net.minecraft.sound.SoundEvents
 import net.minecraft.util.math.BlockPos
@@ -41,27 +39,29 @@ import net.minecraft.util.math.ChunkPos
 import net.minecraft.world.chunk.WorldChunk
 import java.awt.Color
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.abs
 
-object NoSpawnerDetector : Module(
-	name = "NoSpawnerDetector",
-	description = "Detects dungeon chests without spawners",
+object DeactivatedSpawnerDetector : Module(
+	name = "DeactivatedSpawnerDetector",
+	description = "Detects spawners that have torches placed on them to deactivate them",
 	tag = ModuleTag.WORLD
 ) {
-	val dungeonGroundBlocks = ReferenceArraySet<Block>(arrayOf(Blocks.COBBLESTONE, Blocks.MOSSY_COBBLESTONE))
-	val detectedChests: ConcurrentHashMap.KeySetView<BlockPos, Boolean> = ConcurrentHashMap.newKeySet<BlockPos>()
+	val detectedSpawners: ConcurrentHashMap.KeySetView<BlockPos, Boolean> = ConcurrentHashMap.newKeySet<BlockPos>()
 
-	val esp by setting("ESP", true, description = "Highlight detected chests with a box")
-	val espColor by setting("Color", Color(255, 0, 0, 100), description = "Color of detected chests") { esp }
-	val tracer by setting("Tracer", true, description = "Draw a line from the player to detected chests")
-	val tracerColor by setting("Tracer Color", Color(255, 0, 0, 100), description = "Color of tracers to detected chests") { tracer }
-    val tracerWidth by setting("Tracer Width", 0.004f, 0.001f..0.010f, 0.001f, description = "Width of tracers to detected chests") { tracer }
+	val lightThreshold by setting("Light Threshold", 1, 1..15, 1, description = "Minimum light level to consider a spawner deactivated")
+		.onValueChange { from, to -> detectedSpawners.clear(); rescanLoadedChunks() }
+	val onlyDungeon by setting("Only Dungeon Spawners", true, description = "Only consider spawners on top of cobblestone")
+		.onValueChange { from, to -> detectedSpawners.clear(); rescanLoadedChunks() }
+	val esp by setting("ESP", true, description = "Highlight detected spawners with a box")
+	val espColor by setting("Color", Color(255, 0, 0, 100), description = "Color of detected spawners") { esp }
+	val tracer by setting("Tracer", true, description = "Draw a line from the player to detected spawners")
+	val tracerColor by setting("Tracer Color", Color(255, 0, 0, 100), description = "Color of tracers to detected spawners") { tracer }
+	val tracerWidth by setting("Tracer Width", 0.004f, 0.001f..0.010f, 0.001f, description = "Width of tracers to detected spawners") { tracer }
 	val notification by setting("Notification", mutableSetOf<Notification>(), mutableSetOf<Notification>(Notification.Sound))
 
-	val chunkedRenderer = chunkedRenderer("ChunkedRendererNoSpawnerDetector", depthTest = { false }) { world, pos ->
+	val chunkedRenderer = chunkedRenderer("Chunked Renderer Deactivated Spawner Detector", depthTest = { false }) { world, pos ->
 		if (esp) {
 			runSafe {
-				if (pos.toBlockPos() in detectedChests) {
+				if (pos.toBlockPos() in detectedSpawners) {
 					box(pos.toBlockPos()) {
 						allColors(espColor)
 					}
@@ -71,8 +71,8 @@ object NoSpawnerDetector : Module(
 	}
 
 	init {
-		immediateRenderer("No Spawner Detector Immediate Renderer") {
-			if (tracer) detectedChests.forEach {
+		immediateRenderer("Immediate Renderer Deactivated Spawner Detector") {
+			if (tracer) detectedSpawners.forEach {
 				val endPoint = worldToScreenNormalized(it.toCenterPos()) ?: return@forEach
 				screenLineGradient(
 					0.5f, 0.5f,
@@ -89,29 +89,33 @@ object NoSpawnerDetector : Module(
 		}
 
 		listen<WorldEvent.ChunkEvent.Unload> { event ->
-            deleteResultsInChunk(event.chunk.pos)
-        }
+			deleteResultsInChunk(event.chunk.pos)
+		}
 
 		onEnable {
-			for (i in 0 until world.chunkManager.chunks.chunks.length()) {
-				try {
-					val chunk = world.chunkManager.chunks.chunks.get(i) ?: continue
-					scanForChests(chunk)
-				} catch (_: Exception) {
-					// Exception? too bad
-				}
-			}
-
-			chunkedRenderer.rebuild()
+			rescanLoadedChunks()
 		}
 
 		onDisable {
-			detectedChests.clear()
+			detectedSpawners.clear()
 		}
 	}
 
+	private fun SafeContext.rescanLoadedChunks() {
+		for (i in 0 until world.chunkManager.chunks.chunks.length()) {
+			try {
+				val chunk = world.chunkManager.chunks.chunks.get(i) ?: continue
+				scanForSpawners(chunk)
+			} catch (_: Exception) {
+				// Exception? too bad
+			}
+		}
+
+		chunkedRenderer.rebuild()
+	}
+
 	private fun SafeContext.deleteResultsInChunk(chunkPos: ChunkPos) {
-		detectedChests.removeIf { it.chunkPos == chunkPos }
+		detectedSpawners.removeIf { it.chunkPos == chunkPos }
 		chunkedRenderer.rebuildChunk(chunkPos.x, chunkPos.z)
 	}
 
@@ -122,7 +126,7 @@ object NoSpawnerDetector : Module(
 
 				if (hasNeighborsLoaded(neighborPos)) {
 					val neighborChunk = world.getChunk(neighborPos.x, neighborPos.z) ?: continue
-					scanForChests(neighborChunk)
+					scanForSpawners(neighborChunk)
 				}
 			}
 		}
@@ -138,17 +142,16 @@ object NoSpawnerDetector : Module(
 		return true
 	}
 
-	private fun SafeContext.scanForChests(chunk: WorldChunk) {
+	private fun SafeContext.scanForSpawners(chunk: WorldChunk) {
 		deleteResultsInChunk(chunk.pos)
 		chunk.blockEntities.forEach { (pos, entity) ->
-			if (entity.type == BlockEntityType.CHEST) {
-				if (isSpawnerNear(pos)) {
-                    return@forEach // Skip if a spawner is nearby
-                }
-				if (touchesDungeonGround(pos)) {
-					detectedChests.add(pos)
+			if (entity.type == BlockEntityType.MOB_SPAWNER) {
+				if (onlyDungeon && world.getBlockState(pos.down()).block !in dungeonGroundBlocks) return@forEach
+
+				if (hasLight(pos)) {
+					detectedSpawners.add(pos)
 					Notification.Coordinates.ifActive {
-						info("No-spawner chest detected at ${pos.x}, ${pos.y}, ${pos.z}")
+						info("Light up spawner detected at ${pos.x}, ${pos.y}, ${pos.z}")
 					}
 					Notification.Sound.ifActive {
 						SoundManager.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP)
@@ -159,36 +162,24 @@ object NoSpawnerDetector : Module(
 		chunkedRenderer.rebuildChunk(chunk.pos.x, chunk.pos.z)
 	}
 
-	private fun SafeContext.isSpawnerNear(pos: BlockPos): Boolean {
-		BlockPos.iterateOutwards(pos, 8, 4, 8).forEach { checkPos ->
-            val blockEntity = mc.world?.getBlockEntity(checkPos)
-            if (blockEntity?.type == BlockEntityType.MOB_SPAWNER) {
-                return true
-            }
-        }
-		return false
-	}
-
-	private fun SafeContext.touchesDungeonGround(pos: BlockPos): Boolean {
+	private fun SafeContext.hasLight(pos: BlockPos): Boolean {
 		for (dx in -1..1) {
-            for (dz in -1..1) {
-				for (dy in -1..1) {
-					if (dx == 0 && dz == 0 && dy == 0) continue // Skip the chest block itself
-					if (abs(dx) + abs(dz) + abs(dy) > 1) continue // Only check adjacent blocks (not diagonals)
-					val block = world.getBlockState(pos.add(dx, dy, dz))?.block ?: continue
-					if (block in dungeonGroundBlocks) return true
+			for (dy in -1..1) {
+				for (dz in -1..1) {
+					val checkPos = pos.add(dx, dy, dz)
+					if (world.getLightLevel(checkPos) > lightThreshold) return true
 				}
-            }
-        }
+			}
+		}
 		return false
 	}
 
 	val BlockPos.chunkPos
-	    get() = ChunkPos(this)
+		get() = ChunkPos(this)
 
 	enum class Notification(override val displayName: String, override val description: String) : NamedEnum, Describable {
-		Sound("Sound", "Play a sound when a chest is detected"),
-		Coordinates("Coordinates", "Logs coordinates of detected chests in chat");
+		Sound("Sound", "Play a sound when a spawner is detected"),
+		Coordinates("Coordinates", "Logs coordinates of detected spawners in chat");
 
 		fun isActive() = notification.contains(this)
 
